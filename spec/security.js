@@ -462,12 +462,17 @@ describe('security issues', function() {
     });
   });
 
-  describe('GHSA-2w6w-674q-4c4q, GHSA-xhpv-hc6g-r9c6, GHSA-3mfm-83xf-c92r: untrusted AST inputs', function() {
+  describe('GHSA-2w6w-674q-4c4q, GHSA-xhpv-hc6g-r9c6, GHSA-3mfm-83xf-c92r, GHSA-8r5x-fm3f-whwj: untrusted AST inputs', function() {
     if (!Handlebars.compile) {
       return;
     }
 
     function createInjectedProgram() {
+      var loc = {
+        source: null,
+        start: { line: 1, column: 0 },
+        end: { line: 1, column: 20 }
+      };
       return {
         type: 'Program',
         body: [
@@ -478,12 +483,14 @@ describe('security issues', function() {
               open: false,
               close: false
             },
+            loc: loc,
             path: {
               type: 'PathExpression',
               data: false,
               depth: 0,
               parts: ['lookup'],
-              original: 'lookup'
+              original: 'lookup',
+              loc: loc
             },
             params: [
               {
@@ -491,12 +498,14 @@ describe('security issues', function() {
                 data: false,
                 depth: 0,
                 parts: [],
-                original: 'this'
+                original: 'this',
+                loc: loc
               },
               {
                 type: 'NumberLiteral',
                 value: '{},{})) + (Function) + (({}',
-                original: 1
+                original: 1,
+                loc: loc
               }
             ]
           }
@@ -505,10 +514,12 @@ describe('security issues', function() {
     }
 
     it('should reject AST NumberLiteral type confusion in compile()', function() {
+      // NumberLiteral.value is emitted as a raw JavaScript literal, so the
+      // compiler rejects anything that is not a number.
       expect(function() {
         var template = Handlebars.compile(createInjectedProgram());
         template({});
-      }).to.throw(/Invalid AST/);
+      }).to.throw(/Invalid AST: NumberLiteral value must be a number/);
     });
 
     it('should reject AST objects passed via dynamic partial lookup', function() {
@@ -517,7 +528,240 @@ describe('security issues', function() {
         template({
           payload: createInjectedProgram()
         });
-      }).to.throw(/Invalid AST|could not be found/);
+      }).to.throw(/could not be found/);
+    });
+
+    it('should reject a non-integer param depth in stringParams mode', function() {
+      // pushParam passes val.depth to the getContext opcode. In stringParams
+      // mode, getContext stores the depth in lastContext, which contextName
+      // interpolates into generated code as 'depths[' + depth + ']'. A depth
+      // that is not a non-negative integer is therefore rejected.
+      var loc = {
+        source: null,
+        start: { line: 1, column: 0 },
+        end: { line: 1, column: 20 }
+      };
+      var maliciousAST = {
+        type: 'Program',
+        body: [
+          {
+            type: 'MustacheStatement',
+            escaped: true,
+            strip: { open: false, close: false },
+            loc: loc,
+            path: {
+              type: 'PathExpression',
+              data: false,
+              depth: 0,
+              parts: ['lookup'],
+              original: 'lookup',
+              loc: loc
+            },
+            params: [
+              {
+                type: 'PathExpression',
+                data: false,
+                depth: 'function(){throw new Error("INJECTION")}()',
+                parts: [],
+                original: '',
+                loc: loc
+              }
+            ]
+          }
+        ]
+      };
+
+      expect(function() {
+        var template = Handlebars.compile(maliciousAST, {
+          stringParams: true
+        });
+        template({});
+      }).to.throw(
+        /Invalid AST: PathExpression depth must be a non-negative integer/
+      );
+    });
+
+    it('should reject non-array blockParams', function() {
+      // The compiler reads program.blockParams.length from the AST and
+      // javascript-compiler.js interpolates that value verbatim into a
+      // container.program(...) call. blockParams must therefore be an array
+      // of strings, so that the length is always a safe integer.
+      var maliciousAST = {
+        type: 'Program',
+        loc: { start: { line: 1, column: 0 } },
+        body: [
+          {
+            type: 'BlockStatement',
+            path: {
+              type: 'PathExpression',
+              data: false,
+              depth: 0,
+              parts: ['rce'],
+              original: 'rce',
+              loc: { start: { line: 1, column: 0 } }
+            },
+            params: [],
+            program: {
+              type: 'Program',
+              blockParams: {
+                length: "(()=>{throw new Error('INJECTION')})()"
+              },
+              body: [],
+              loc: { start: { line: 1, column: 0 } }
+            },
+            openStrip: { open: false, close: false },
+            inverseStrip: { open: false, close: false },
+            closeStrip: { open: false, close: false },
+            loc: { start: { line: 1, column: 0 } }
+          }
+        ]
+      };
+
+      expect(function() {
+        var template = Handlebars.compile(maliciousAST, {
+          stringParams: true
+        });
+        template({});
+      }).to.throw(/Invalid AST: Program blockParams must be an array/);
+    });
+
+    it('should reject non-number NumberLiteral values in stringParams mode', function() {
+      // In stringParams mode, pushStringParam emits any non-string param
+      // value as a raw literal, and the code generator concatenates array
+      // chunks verbatim. The NumberLiteral handler therefore rejects any
+      // value that is not a number.
+      var loc = {
+        source: null,
+        start: { line: 1, column: 0 },
+        end: { line: 1, column: 20 }
+      };
+      var maliciousAST = {
+        type: 'Program',
+        body: [
+          {
+            type: 'MustacheStatement',
+            escaped: true,
+            strip: { open: false, close: false },
+            loc: loc,
+            path: {
+              type: 'PathExpression',
+              data: false,
+              depth: 0,
+              parts: ['helper'],
+              original: 'helper',
+              loc: loc
+            },
+            params: [
+              {
+                type: 'NumberLiteral',
+                value: ['(function(){throw new Error("INJECTION")})()'],
+                original: 1,
+                loc: loc
+              }
+            ]
+          }
+        ]
+      };
+
+      expect(function() {
+        var template = Handlebars.compile(maliciousAST, {
+          stringParams: true
+        });
+        template({});
+      }).to.throw(/Invalid AST: NumberLiteral value must be a number/);
+    });
+
+    it('should not compile data objects passed via dynamic partial lookup', function() {
+      // resolvePartial() used to accept any value with a truthy "call"
+      // property as a compiled partial. A JSON object with "call" and
+      // "type": "Program" then reached env.compile() and was rendered as a
+      // template. Such values are now treated as partial names instead.
+      var payload = createInjectedProgram();
+      payload.call = 1;
+      payload.body[0].escaped = false;
+
+      expect(function() {
+        var template = Handlebars.compile('{{> (lookup . "payload")}}');
+        template({ payload: payload });
+      }).to.throw(/could not be found/);
+    });
+
+    it('should not compile AST-shaped objects registered as partials', function() {
+      expect(function() {
+        var template = Handlebars.compile('{{> payload}}');
+        template({}, { partials: { payload: createInjectedProgram() } });
+      }).to.throw(/must be strings or functions/);
+    });
+
+    function createDepthInjectionProgram() {
+      // The depth of a PathExpression ends up in the generated code as
+      // 'depths[' + depth + ']', so a string depth breaks out of the
+      // property access and runs arbitrary code when the template executes.
+      var loc = {
+        source: null,
+        start: { line: 1, column: 0 },
+        end: { line: 1, column: 20 }
+      };
+      return {
+        type: 'Program',
+        body: [
+          {
+            type: 'MustacheStatement',
+            escaped: true,
+            strip: { open: false, close: false },
+            loc: loc,
+            path: {
+              type: 'PathExpression',
+              data: false,
+              depth:
+                '0] + (function(){throw new Error("INJECTION")})() + depths[0',
+              parts: ['name'],
+              original: 'name',
+              loc: loc
+            },
+            params: []
+          }
+        ]
+      };
+    }
+
+    it('should reject a non-integer PathExpression depth in compile()', function() {
+      expect(function() {
+        var template = Handlebars.compile(createDepthInjectionProgram());
+        template({ name: 'x' });
+      }).to.throw(
+        /Invalid AST: PathExpression depth must be a non-negative integer/
+      );
+    });
+
+    it('should not compile an AST written into @partial-block by a helper', function() {
+      // A helper that copies its hash into an arbitrary object can overwrite
+      // @partial-block in the parent data frame (reachable via @_parent).
+      // The next {{> @partial-block}} must not compile that object.
+      var template = Handlebars.compile(
+        '{{#*inline "myPartial"}}{{> @partial-block}}{{> @partial-block}}{{/inline}}' +
+          '{{#> myPartial}}{{merge @_parent partial-block=payload}}{{/myPartial}}'
+      );
+      var helpers = {
+        merge: function(target, options) {
+          var hash = options.hash;
+          for (var key in hash) {
+            if (Object.prototype.hasOwnProperty.call(hash, key)) {
+              target[key] = hash[key];
+            }
+          }
+          return '';
+        }
+      };
+
+      expect(function() {
+        template(
+          { name: 'x', payload: createDepthInjectionProgram() },
+          { helpers: helpers }
+        );
+      }).to.throw(
+        /The partial @partial-block could not be compiled: partials must be strings or functions/
+      );
     });
   });
 
