@@ -1,0 +1,38 @@
+name: Seal build
+
+# Build-and-pack only: the test suite runs on Travis (.travis.yml).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  pack:
+    name: Build and pack (Node 10)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          # The published tarball was packed with Node 10.23.3 / npm 6.14.11.
+          node-version: '10.23.3'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build dist
+        # Gruntfile `build` + the build steps of `release` (amd, uglify, copy:dist
+        # adds the licence banner to dist/*.js); its test:min step runs on Travis.
+        run: npx grunt clean build amd uglify copy:dist
+
+      - name: Pack
+        run: npm pack
+
+      - name: Upload tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: handlebars-tgz
+          path: handlebars-*.tgz
+          if-no-files-found: error
